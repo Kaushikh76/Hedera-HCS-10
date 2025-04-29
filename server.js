@@ -22,9 +22,8 @@ const {
 } = require('@hashgraph/sdk');
 const { initializePlatformToken } = require('./utils/token');
 
-// Import routes
-const paperRoutes = require('./routes/paperRoutes');
-const chatRoutes = require('./routes/chatRoutes');
+// Import models - Make sure to create this file as described
+require('./models/PaperDocument');
 
 // Initialize the Express app
 const app = express();
@@ -50,40 +49,50 @@ mongoose.connect(process.env.MONGODB_URI, {
 // Setup GridFS for large file storage
 const conn = mongoose.connection;
 let gfs;
-conn.on('open', () => {
+
+// Important: Wait for MongoDB connection before initializing GridFS
+conn.once('open', () => {
   gfs = new mongoose.mongo.GridFSBucket(conn.db, { bucketName: 'papers' });
   app.locals.gfs = gfs; // Make GridFS available to routes
   console.log('GridFS initialized for paper storage');
-});
-
-// Setup Multer GridFS storage
-const storage = new GridFsStorage({
-  url: process.env.MONGODB_URI,
-  options: { useUnifiedTopology: true },
-  file: (req, file) => ({
-    filename: `${Date.now()}-${file.originalname}`,
-    bucketName: 'papers'
-  })
-});
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 30 * 1024 * 1024 }, // 30MB limit for 20-30 page documents
-  fileFilter: (req, file, cb) => {
-    // Accept pdf, docx, txt, md and research-oriented file types
-    const filetypes = /pdf|docx|txt|md|tex|csv|xlsx|zip/;
-    const mimetype = filetypes.test(file.mimetype);
-    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-    
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Allowed types: PDF, DOCX, TXT, MD, TEX, CSV, XLSX, ZIP'));
+  
+  // Setup Multer GridFS storage - IMPORTANT: Initialize this AFTER MongoDB connection is established
+  const storage = new GridFsStorage({
+    url: process.env.MONGODB_URI,
+    options: { 
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    },
+    file: (req, file) => {
+      return {
+        filename: `${Date.now()}-${file.originalname}`,
+        bucketName: 'papers',
+        metadata: { originalname: file.originalname }
+      };
     }
-  }
+  });
+  
+  // Create and attach the upload middleware AFTER storage is initialized
+  const upload = multer({ 
+    storage,
+    limits: { fileSize: 30 * 1024 * 1024 }, // 30MB limit for 20-30 page documents
+    fileFilter: (req, file, cb) => {
+      // Accept pdf, docx, txt, md and research-oriented file types
+      const filetypes = /pdf|docx|txt|md|tex|csv|xlsx|zip/;
+      const mimetype = filetypes.test(file.mimetype);
+      const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+      
+      if (mimetype && extname) {
+        return cb(null, true);
+      } else {
+        cb(new Error('Invalid file type. Allowed types: PDF, DOCX, TXT, MD, TEX, CSV, XLSX, ZIP'));
+      }
+    }
+  });
+  
+  // Make upload middleware available to routes
+  app.locals.upload = upload;
 });
-
-// Make upload middleware available to routes
-app.locals.upload = upload;
 
 // Hedera client setup
 const getClient = async () => {
@@ -144,95 +153,9 @@ const getOrCreateMainTopic = async (client) => {
   }
 };
 
-// Document schema - integrated with our PaperDocument model
-const enhancedDocSchema = new mongoose.Schema({
-  // Original MCP fields
-  filename: String,
-  fileId: mongoose.Schema.Types.ObjectId,
-  originalname: String,
-  mimetype: String,
-  size: Number,
-  uploadDate: Date,
-  topicId: String,
-  
-  // DeSci specific fields
-  paperId: {
-    type: String,
-    required: true,
-    unique: true,
-    index: true
-  },
-  title: {
-    type: String,
-    required: true
-  },
-  authors: [{
-    type: String,
-    required: true
-  }],
-  abstract: {
-    type: String,
-    required: true
-  },
-  keywords: [{
-    type: String
-  }],
-  contentTopicId: {
-    type: String,
-    required: true
-  },
-  publisherId: {
-    type: String,
-    required: true
-  },
-  fee: {
-    type: Number,
-    required: true,
-    default: 10
-  },
-  publishDate: {
-    type: Date,
-    default: Date.now
-  },
-  accessCount: {
-    type: Number,
-    default: 0
-  },
-  lastAccessedAt: {
-    type: Date
-  }
-}, {
-  timestamps: true
-});
-
-// Create a text index for search functionality
-enhancedDocSchema.index({
-  title: 'text',
-  abstract: 'text',
-  keywords: 'text'
-});
-
-// Increments the access count and updates last accessed time
-enhancedDocSchema.methods.recordAccess = async function() {
-  this.accessCount++;
-  this.lastAccessedAt = new Date();
-  return this.save();
-};
-
-// Static method to find papers by search query
-enhancedDocSchema.statics.searchPapers = async function(query) {
-  if (!query || query.trim() === '') {
-    return this.find({}, { content: 0 }); // Exclude content for listing
-  }
-  
-  return this.find(
-    { $text: { $search: query } },
-    { score: { $meta: "textScore" } } // Include text match score
-  ).sort({ score: { $meta: "textScore" } });
-};
-
-// Register the model
-const PaperDocument = mongoose.model('PaperDocument', enhancedDocSchema);
+// Import routes - After GridFS is initialized
+const paperRoutes = require('./routes/paperRoutes');
+const chatRoutes = require('./routes/chatRoutes');
 
 // Set up routes
 app.use('/api/papers', paperRoutes);
